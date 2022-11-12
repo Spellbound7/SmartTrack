@@ -1,0 +1,207 @@
+package SmartTrack
+
+/*
+    SmartTrack v1.0
+
+    by Spellbound
+
+    DESCRIPTION
+    SmartTrack will allow you to set a unit as a 'tracker'. When this unit is right-clicked by another unit,
+    the tracker will begin to check if the right-clicker is within the range that was assigned to it. When the
+    unit comes in range, an event fires.
+
+    API
+
+            new Tracker(whatRange, whichUnit) returns Tracker
+        This is how you setup a unit as a tracker. A unit can only have 1 Tracker instance on it at a time.
+        Calling this on a unit that is already a tracker will destroy the previous tracking and replace it with
+        a new instance. It is not recommended you do this.
+
+            Tracker.getId(whichUnit) returns Tracker
+        If you don't have the Tracker instance stored, you can retrieve it with this function.
+
+            destroy whichTracker
+        This is how you remove a unit as a tracker.
+
+            TrackInstance.end(unit whichUnit, boolean halt)
+        If you want to terminate a TrackInstance, call this function. Setting bolean halt to true will cause the
+        unit to stop moving.
+
+    CLOSURES
+
+            SmartTrack.onStart() (smarty, tracker) ->
+        This closure will fire when a unit begins tracking. You can use this for filtering, for example.
+        This creates a TrackingInstance is created.
+
+            SmartTrack.onRange() (smarty, tracker) ->
+        This closure fires when a unit comes within range of the tracker it right-clicked.
+
+            SmartTrack.onEnd() (smarty, tracker) ->
+        This closure will fire when a TrackingInstance has ended, either by interrupting the on-going tracking
+        or by coming within range of a tracker.
+
+*/
+
+import public ClosureTimers
+import public ClosureEvents
+import public LinkedList
+import public HashMap
+import OrderIds
+
+boolean ignoreOrders = false
+LinkedList<TrackInstance> list = new LinkedList<TrackInstance>
+
+TrackInstance array idTrack
+SmartTrackListener array firstListener
+
+constant int EVENT_TRACK_START = 0
+constant int EVENT_TRACK_ENDED = 1
+constant int EVENT_TRACK_RANGE = 2
+
+public class Tracker
+    real range
+    unit tracker
+    boolean isTracker
+    trigger trig
+    private static HashMap<int, Tracker> hash = new HashMap<int, Tracker>
+
+    construct(real trackRange, unit trackerUnit)
+        let check = hash.get(trackerUnit.getHandleId())
+        if check != null
+            destroy check
+        this.range = trackRange
+        this.tracker = trackerUnit
+        this.isTracker = true
+        this.trig = CreateTrigger()
+        hash.put(trackerUnit.getHandleId(), this)
+        this.trig.registerUnitInRangeSource(trackerUnit, trackRange, null)
+        this.trig.addCondition(Filter(function filter))
+
+    ondestroy
+        hash.remove(this.tracker.getHandleId())
+        this.range = 0.
+        this.tracker = null
+        this.isTracker = false
+        this.trig.destr()
+
+    static function filter() returns boolean
+        var source = GetTriggeringTrigger().getSource()
+        let u = GetTriggerUnit()
+        let idS = TrackInstance.getId(u)
+        if list.has(idS) and idS.tracker == source
+            list.remove(idS)
+            destroy idS
+            fireEvent(EVENT_TRACK_RANGE, u, source)
+            fireEvent(EVENT_TRACK_ENDED, u, source)
+            return true
+        return false
+
+    static function getId(unit u) returns thistype
+        return hash.get(u.getHandleId())
+
+
+class TrackInstance
+    unit smarty
+    unit tracker
+    private static HashMap<int, TrackInstance> hash = new HashMap<int, TrackInstance>
+
+    construct(unit s, unit t)
+        this.smarty = s
+        this.tracker = t
+        hash.put(s.getHandleId(), this)
+
+    ondestroy
+        hash.remove(this.smarty.getHandleId())
+        this.smarty = null
+        this.tracker = null
+
+    static function getId(unit u) returns thistype
+        return hash.get(u.getHandleId())
+
+    static function stop(unit u, boolean halt)
+        let idS = TrackInstance.getId(u)
+        if idS != null
+            idS.endTrack()
+            if halt
+                doAfter(0.) () ->
+                    u.issueImmediateOrderById(OrderIds.stunned)
+  
+    function endTrack()
+        list.remove(this)
+        destroy this
+      
+
+function fireEvent(int i, unit smart, unit track)
+    var listener = firstListener[i]
+    while listener != null
+        listener.onEvent(smart, track)
+        listener = listener.next
+
+function trackOrders()
+    let smart = GetTriggerUnit()
+    let track = GetOrderTargetUnit()
+    var idS = TrackInstance.getId(smart)
+    let idT = Tracker.getId(track)
+
+    if not ignoreOrders
+        // if track is not null that means you have right-clicked on a unit.
+        if track != null and GetIssuedOrderId() == Orders.smart
+            if idT.isTracker
+                if idS == null // If the right-clicker has no tracker identified...
+                    if IsUnitInRange(smart, track, idT.range)
+                        // Events
+                        fireEvent(EVENT_TRACK_START, smart, track)
+                        fireEvent(EVENT_TRACK_RANGE, smart, track)
+                        fireEvent(EVENT_TRACK_ENDED, smart, track)
+                    else
+                        // If not in range, create a tracker instance
+                        idS = new TrackInstance(smart, track)
+                        list.push(idS)
+                        idS.tracker = track
+                        fireEvent(EVENT_TRACK_START, smart, track)
+                else
+                    // If the right-clicker was already being tracked by another tracker buy then
+                    // right-clicked on another tracker, check if that new tracker is in range.
+                    if IsUnitInRange(smart, track, idT.range)
+                        idS.endTrack()
+                        // Events
+                        fireEvent(EVENT_TRACK_START, smart, track)
+                        fireEvent(EVENT_TRACK_RANGE, smart, track)
+                        fireEvent(EVENT_TRACK_ENDED, smart, track)
+                    else
+                        idS.tracker = track
+                        fireEvent(EVENT_TRACK_START, smart, track)
+        else
+            // if you had a tracker but did not right-click on a unit, remove from smarty list.
+            if idS != null
+                idS.endTrack()
+                fireEvent(EVENT_TRACK_ENDED, smart, track)
+  
+init
+    registerPlayerUnitEvent(EVENT_PLAYER_UNIT_ISSUED_TARGET_ORDER, function trackOrders)
+    registerPlayerUnitEvent(EVENT_PLAYER_UNIT_ISSUED_POINT_ORDER, function trackOrders)
+    registerPlayerUnitEvent(EVENT_PLAYER_UNIT_ISSUED_ORDER, function trackOrders)
+      
+
+abstract class SmartTrackListener
+    thistype prev = null
+    thistype next = null
+    abstract function onEvent(unit smarty, unit tracker)
+
+class SmartTrack
+
+    static function onStart(SmartTrackListener listener) returns SmartTrackListener
+        return setupEvent(EVENT_TRACK_START, listener)
+
+    static function inRange(SmartTrackListener listener) returns SmartTrackListener
+        return setupEvent(EVENT_TRACK_RANGE, listener)
+  
+    static function onEnd(SmartTrackListener listener) returns SmartTrackListener
+        return setupEvent(EVENT_TRACK_ENDED, listener)
+
+    private static function setupEvent(int i, SmartTrackListener listener) returns SmartTrackListener
+        if firstListener[i] != null
+            firstListener[i].prev = listener
+            listener.next = firstListener[i]
+        firstListener[i] = listener
+        return listener
